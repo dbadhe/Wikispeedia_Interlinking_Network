@@ -1,0 +1,343 @@
+
+---
+title: "Wikipedia Path Analysis"
+author: "Dhanashree Badhe"
+date: "2023-10-27"
+output: html_document
+---
+
+
+## Installing packages
+
+```{r}
+# Install the required package
+library(readr)
+library(utils)
+library(tidyr)
+library(igraph)
+library(tidyverse)
+library(tidyselect)
+library(stringr)
+
+# Function to decode URL-encoded strings
+url_decode <- function(encoded) {
+  decoded <- URLdecode(encoded)
+  return(decoded)
+}
+
+
+# Path to your file
+setwd('/Users/pingle/Downloads/wikispeedia_paths-and-graph') 
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = '/Users/pingle/Downloads/wikispeedia_paths-and-graph')
+```
+
+## Adding the data
+
+articles_df = Articles data
+
+Here, we're loading all the articles, the categories of the pages and the links between the articles.
+
+```{r}
+##ARTICLES 
+
+# Read the TSV file, skipping the initial comments and metadata
+
+articles_df <- read.table('articles.tsv', sep = '\t', header = FALSE, skip = 12, quote = "", stringsAsFactors = FALSE)
+
+# Assuming the URL-encoded article names are in the first column
+articles_df$V1 <- sapply(articles_df$V1, url_decode)
+
+# Print the first few rows to check
+head(articles_df)
+
+dim(articles_df)
+
+```
+
+```{r}
+#CATEGORIES
+cat_df <- read.table('categories.tsv', sep = '\t', header = FALSE, skip = 13, quote = "", stringsAsFactors = FALSE)
+cat_df$V1 <- sapply(cat_df$V1, url_decode)
+print("The category dataframe")
+head(cat_df)
+dim(cat_df)
+print("******")
+
+#LINKS 
+links_df <- read.table('links.tsv', sep = '\t', header = FALSE, skip = 12, quote = "", stringsAsFactors = FALSE)
+links_df$V1 <- sapply(links_df$V1, url_decode)
+links_df$V2 <- sapply(links_df$V2, url_decode)
+print("The Links dataframe")
+head(links_df)
+dim(links_df)
+print("******")
+
+```
+
+### Adding finished paths
+
+Finished paths are all the games where the user was able to go to the finish point.
+
+```{r}
+## FINISHED PATHS 
+
+# Define the path to your TSV file
+file_path <- "/Users/pingle/Downloads/wikispeedia_paths-and-graph/paths_finished.tsv"
+
+# Read the file into R, assuming that the actual data starts after the comment lines
+# Adjust the 'skip' argument to match the number of lines of comments in your file
+data <- read.table(file_path, header = FALSE, sep = "\t", skip = 18, stringsAsFactors = FALSE, fill = TRUE)
+
+# Assign column names to the dataframe (based on the FORMAT line)
+colnames(data) <- c("hashedIpAddress", "timestamp", "durationInSec", "path", "rating")
+
+# Remove any rows that are just comment lines (if they were included in the read)
+data <- data[!grepl("^#", data$hashedIpAddress), ]
+
+# Split the 'path' column into separate columns
+# First, determine the maximum number of steps in any path
+max_steps <- max(str_count(data$path, ";") + 1)
+
+# Create new columns for each step
+Fpath <- data %>%
+  separate(col = path, into = paste0("Step", 1:max_steps), sep = ";", fill = "right", extra = "merge") %>%
+  mutate(across(starts_with("Step"), ~na_if(.,"<"))) %>%
+  mutate(rating = na_if(rating, "NULL"))
+
+# Convert the 'rating' column to numeric, turning 'NULL' into NA
+Fpath$rating <- as.numeric(Fpath$rating)
+
+# View the first few rows of the formatted data
+head(Fpath)
+dim(Fpath)
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(igraph)
+
+# Consolidate steps into a single column
+df_fpath <- Fpath %>%
+  pivot_longer(cols = starts_with("Step"), names_to = "Step", values_to = "Article") %>%
+  filter(!is.na(Article)) %>%
+  arrange(hashedIpAddress, Step)
+
+# Create edges based on consecutive steps for each hashedIpAddress
+edges_f <- df_fpath %>%
+  group_by(hashedIpAddress) %>%
+  mutate(From = Article, To = lead(Article)) %>%
+  filter(!is.na(To))
+
+# Create the graph
+graph_fin <- graph_from_data_frame(d = edges_f[,c("From", "To")], directed = TRUE)
+
+
+```
+
+### Adding Unfinished Paths
+
+```{r}
+
+## UNFINISHED PATHS 
+
+# Define the path to your TSV file
+file_path <- "/Users/pingle/Downloads/wikispeedia_paths-and-graph/paths_unfinished.tsv"
+
+# Load the Tidyverse for data manipulation
+library(tidyverse)
+
+# Define the path to your TSV file
+file_path <- "/Users/pingle/Downloads/wikispeedia_paths-and-graph/paths_unfinished.tsv"
+
+# Read the file into R, assuming that the actual data starts after the comment lines
+# Adjust the 'skip' argument to match the number of lines of comments in your file
+data <- read.table(file_path, header = FALSE, sep = "\t", skip = 18, stringsAsFactors = FALSE, fill = TRUE)
+
+# Assign column names to the dataframe (based on the FORMAT line)
+colnames(data) <- c("hashedIpAddress", "timestamp", "durationInSec", "path", "target", "quitting")
+
+# Remove any rows that are just comment lines (if they were included in the read)
+UFpath <- data[!grepl("^#", data$hashedIpAddress), ]
+head(UFpath)
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(igraph)
+library(ggraph)
+
+# Transform the data into edges
+df_unfinished_long <- UFpath %>%
+  mutate(path = strsplit(as.character(path), ";")) %>%
+  unnest(path) %>%
+  group_by(hashedIpAddress) %>%
+  mutate(From = path, To = lead(path)) %>%
+  ungroup() %>%
+  filter(!is.na(To)) %>%
+  select(From, To)
+
+# Add the target as the final step for each path
+df_unfinished_long <- rbind(df_unfinished_long, UFpath %>%
+                              select(From = path, To = target) %>%
+                              distinct())
+
+# Create the graph
+graph_unf <- graph_from_data_frame(df_unfinished_long, directed = TRUE)
+
+```
+
+### Adding shortest path
+
+```{r}
+##Shortest path 
+
+# Function to read the distance matrix
+read_distance_matrix <- function(file_path) {
+  # Read the lines of the file
+  lines <- readLines(file_path)
+  
+  # Filter out comment lines
+  lines <- lines[!grepl("^#", lines)]
+  
+  # Split each line into individual characters
+  split_lines <- strsplit(lines, "")
+  
+  # Convert to a matrix
+  distance_matrix <- do.call(rbind, lapply(split_lines, function(line) {
+    # Replace underscores with NA
+    line <- gsub("_", NA, line)
+    # Convert to numeric
+    as.numeric(line)
+  }))
+  
+  # Convert the matrix to a dataframe
+  df <- as.data.frame(distance_matrix)
+  
+  # Set the row names and column names to the article names from 'articles_df'
+  rownames(df) <- articles_df$V1
+  colnames(df) <- articles_df$V1
+
+  return(df)
+}
+
+# Replace with the actual path to your file
+file_path <- "/Users/pingle/Downloads/wikispeedia_paths-and-graph/shortest-path-distance-matrix.txt"
+
+# Call the function
+Spath <- read_distance_matrix(file_path)
+
+# Check the dataframe
+head(Spath)
+dim(Spath)
+
+graph_s <- graph_from_adjacency_matrix(Spath, mode = "undirected", weighted = TRUE, diag = FALSE)
+
+
+```
+
+## Social graph and analysis
+
+```{r}
+#Adding library for graphs 
+library(igraph)
+
+#creating graphs for analysis 
+g_fin <- graph_from_data_frame(d = edges_f[,c("From", "To")], directed = TRUE)
+g_unfin <- graph_from_data_frame(df_unfinished_long, directed = TRUE)
+g_link <- graph_from_data_frame(links_df, directed = TRUE)
+
+library(ggplot2)
+
+
+
+```
+
+```{r}
+plot(g_fin, vertex.label=NA, vertex.size=5, vertex.color="blue", 
+     edge.color="gray", edge.arrow.size=.5, main="Finished Paths", 
+     layout=layout_with_fr(g_fin))
+
+plot(g_unfin, vertex.label=NA, vertex.size=5, vertex.color="red", 
+     edge.color="gray", edge.arrow.size=.5, main="Unfinished Paths", 
+     layout=layout_with_fr(g_unfin))
+
+plot(g_link, vertex.label=NA, vertex.size=5, vertex.color="green", 
+     edge.color="gray", edge.arrow.size=.5, main="Link Network", 
+     layout=layout_with_fr(g_link))
+
+
+```
+
+```{r}
+library(igraph)
+library(dplyr)
+library(ggplot2)
+
+# Function to calculate centrality measures
+calculate_metrics <- function(graph) {
+  degree <- degree(graph, mode = "all")
+  closeness <- closeness(graph, mode = "all")
+  betweenness <- betweenness(graph, directed = TRUE)
+  data.frame(degree = degree, closeness = closeness, betweenness = betweenness)
+}
+
+# Calculating for each graph
+metrics_fin <- calculate_metrics(g_fin) %>% mutate(graph = "Finished")
+metrics_unfin <- calculate_metrics(g_unfin) %>% mutate(graph = "Unfinished")
+metrics_link <- calculate_metrics(g_link) %>% mutate(graph = "Links")
+
+# COMBINE THE DATAFRAMES
+all_metrics <- bind_rows(metrics_fin, metrics_unfin, metrics_link)
+library(ggplot2)
+
+# Degree Centrality Plot
+ggplot(all_metrics, aes(x = graph, y = degree, fill = graph)) +
+  geom_boxplot() +
+  labs(title = "Degree Centrality Across Networks", x = "", y = "Degree Centrality") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set3")
+
+# Closeness Centrality Plot
+ggplot(all_metrics, aes(x = graph, y = closeness, fill = graph)) +
+  geom_boxplot() +
+  labs(title = "Closeness Centrality Across Networks", x = "", y = "Closeness Centrality") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set3")
+
+# Betweenness Centrality Plot
+ggplot(all_metrics, aes(x = graph, y = betweenness, fill = graph)) +
+  geom_boxplot() +
+  labs(title = "Betweenness Centrality Across Networks", x = "", y = "Betweenness Centrality") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set3")
+
+
+```
+
+```{r}
+
+```
+
+## Doing Analysis 
+
+```{r}
+# Calculate the average number of steps in unfinished paths
+avg_steps_unfin <- UFpath %>%
+  mutate(NumSteps = lengths(strsplit(as.character(path), ";"))) %>%
+  summarise(AverageSteps = mean(NumSteps)) %>%
+  pull(AverageSteps)
+
+# Calculate the average shortest path length for comparison
+# Assuming Spath matrix is correctly set up from shortest-path-distance-matrix.txt
+avg_shortest_path <- mean(Spath[Spath != Inf], na.rm = TRUE)
+
+# Decision point based on comparing average steps in unfinished paths to average shortest path
+decision_point <- ifelse(avg_steps_unfin > avg_shortest_path, avg_shortest_path, avg_steps_unfin)
+
+# Prepare for output
+output <- sprintf("Based on averages, consider restarting after %f steps.", decision_point)
+print(output)
+```
